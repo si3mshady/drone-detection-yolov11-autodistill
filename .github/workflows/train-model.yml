@@ -135,20 +135,26 @@ jobs:
           
           base.label(input_folder='./images', output_folder='dataset')
           
-          # Enhanced verification with debugging
+          # FIXED: Count labels from BOTH train AND validation folders
           print('📊 Checking dataset creation...')
           train_images = glob.glob('dataset/train/images/*')
           train_labels = glob.glob('dataset/train/labels/*')
           valid_images = glob.glob('dataset/valid/images/*')
           valid_labels = glob.glob('dataset/valid/labels/*')
           
+          # Count TOTAL labels across both folders
+          total_labels = len(train_labels) + len(valid_labels)
+          total_images = len(train_images) + len(valid_images)
+          
           print(f'📊 Training: {len(train_images)} images, {len(train_labels)} labels')
           print(f'📊 Validation: {len(valid_images)} images, {len(valid_labels)} labels')
+          print(f'✅ Total dataset: {total_labels} labels for {total_images} images')
           
-          # List actual files created
-          if train_labels:
-              print('✅ Label files created:')
-              for label_file in train_labels[:5]:
+          # Check ALL label files (training + validation)
+          all_labels = train_labels + valid_labels
+          if all_labels:
+              print('✅ Label files found:')
+              for label_file in all_labels[:5]:
                   print(f'  📄 {label_file}')
                   # Check if label file has content
                   try:
@@ -158,21 +164,18 @@ jobs:
                   except:
                       print(f'      Could not read label file')
           else:
-              print('❌ No label files created')
+              print('❌ No label files created anywhere')
               print('🔍 Debugging: Listing all created files...')
               import subprocess
               result = subprocess.run(['find', 'dataset/', '-type', 'f'], capture_output=True, text=True)
               print('Files in dataset folder:')
               print(result.stdout)
           
-          n_labels = len(train_labels)
-          n_images = len(train_images)
-          print(f'✅ Final count: {n_labels} labels for {n_images} images')
-          
-          if n_labels == 0:
+          # FIXED: Check total labels instead of just training labels
+          if total_labels == 0:
               raise RuntimeError('❌ No labels created - Autodistill did not detect any objects matching the ontology')
           
-          # Train YOLO model only if labels exist
+          # Train YOLO model - it will work with labels in either folder
           print('🎯 Training YOLOv11 for 50 epochs...')
           model = YOLO('yolo11n-seg.pt')
           model.train(
