@@ -33,7 +33,7 @@ jobs:
             libgomp1 \
             libgdal-dev \
             ffmpeg \
-            libsndfile1 
+            libsndfile1
       
       - name: Cache Dependencies
         uses: actions/cache@v4
@@ -57,12 +57,22 @@ jobs:
           pip install requests==2.32.3 urllib3==2.4.0
           pip install tqdm==4.67.1 packaging==25.0
           pip install wandb==0.21.0
-          pip install roboflow
       
       - name: Clean Dataset (Clean Slate Method)
         run: |
           echo "🧹 Clean slate - removing old dataset..."
           rm -rf dataset/
+      
+      - name: Initialize Dataset Structure
+        run: |
+          echo "📁 Creating dataset directory structure..."
+          mkdir -p dataset/train/images dataset/train/labels
+          mkdir -p dataset/valid/images dataset/valid/labels
+          touch dataset/train/images/.gitkeep
+          touch dataset/train/labels/.gitkeep
+          touch dataset/valid/images/.gitkeep
+          touch dataset/valid/labels/.gitkeep
+          echo "✅ Dataset structure created"
       
       - name: Count Images
         run: |
@@ -72,6 +82,10 @@ jobs:
             echo "❌ No images found in images/ folder"
             exit 1
           fi
+          
+          # List actual images found
+          echo "📋 Images found:"
+          find images/ -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" | head -5
       
       - name: Autodistill Labeling and YOLO Training
         env:
@@ -81,28 +95,83 @@ jobs:
         run: |
           python3 << 'EOF'
           import os
+          import glob
+          import cv2
           from autodistill_grounded_sam import GroundedSAM
           from autodistill.detection import CaptionOntology
           from ultralytics import YOLO
           
+          # Verify images exist and are readable
+          print('🔍 Verifying images...')
+          image_files = glob.glob('images/*.jpg') + glob.glob('images/*.jpeg') + glob.glob('images/*.png')
+          print(f'Found {len(image_files)} image files: {image_files}')
+          
+          for img_path in image_files[:3]:  # Check first 3 images
+              try:
+                  img = cv2.imread(img_path)
+                  if img is not None:
+                      print(f'✅ {img_path}: {img.shape}')
+                  else:
+                      print(f'❌ {img_path}: Could not load')
+              except Exception as e:
+                  print(f'❌ {img_path}: Error {e}')
+          
           print('🔍 Auto-labeling images with GroundedSAM...')
+          
+          # IMPROVED ONTOLOGY - Broad prompts with lower thresholds
           ontology = CaptionOntology({
-              'DJI Phantom drone flying in the sky': 'drone',
-              'DJI Phantom drone on a surface': 'drone'
+              'drone': 'drone',
+              'quadcopter': 'drone',
+              'aircraft': 'drone'
           })
           
-          base = GroundedSAM(ontology=ontology)
+          # Lower thresholds for better detection
+          base = GroundedSAM(
+              ontology=ontology,
+              box_threshold=0.20,   # Lower from default 0.35
+              text_threshold=0.20   # Lower from default 0.25
+          )
+          
           base.label(input_folder='./images', output_folder='dataset')
           
-          # Verify dataset creation
-          n_labels = len(os.listdir('dataset/train/labels'))
-          n_images = len(os.listdir('dataset/train/images'))
-          print(f'✅ Dataset created: {n_labels} labels for {n_images} images')
+          # Enhanced verification with debugging
+          print('📊 Checking dataset creation...')
+          train_images = glob.glob('dataset/train/images/*')
+          train_labels = glob.glob('dataset/train/labels/*')
+          valid_images = glob.glob('dataset/valid/images/*')
+          valid_labels = glob.glob('dataset/valid/labels/*')
+          
+          print(f'📊 Training: {len(train_images)} images, {len(train_labels)} labels')
+          print(f'📊 Validation: {len(valid_images)} images, {len(valid_labels)} labels')
+          
+          # List actual files created
+          if train_labels:
+              print('✅ Label files created:')
+              for label_file in train_labels[:5]:
+                  print(f'  📄 {label_file}')
+                  # Check if label file has content
+                  try:
+                      with open(label_file, 'r') as f:
+                          lines = f.readlines()
+                          print(f'      Contains {len(lines)} detection(s)')
+                  except:
+                      print(f'      Could not read label file')
+          else:
+              print('❌ No label files created')
+              print('🔍 Debugging: Listing all created files...')
+              import subprocess
+              result = subprocess.run(['find', 'dataset/', '-type', 'f'], capture_output=True, text=True)
+              print('Files in dataset folder:')
+              print(result.stdout)
+          
+          n_labels = len(train_labels)
+          n_images = len(train_images)
+          print(f'✅ Final count: {n_labels} labels for {n_images} images')
           
           if n_labels == 0:
-              raise RuntimeError('❌ No labels created')
+              raise RuntimeError('❌ No labels created - Autodistill did not detect any objects matching the ontology')
           
-          # Train YOLO model
+          # Train YOLO model only if labels exist
           print('🎯 Training YOLOv11 for 50 epochs...')
           model = YOLO('yolo11n-seg.pt')
           model.train(
@@ -122,5 +191,17 @@ jobs:
         if: success()
         with:
           name: drone-model-${{ github.sha }}
-          path: runs/segment/train/weights/best.pt
+          path: |
+            runs/segment/train/weights/best.pt
+            runs/segment/train/weights/last.pt
           retention-days: 30
+      
+      - name: Upload Training Logs (Always)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: training-logs-${{ github.sha }}
+          path: |
+            runs/segment/train/results.csv
+            runs/segment/train/results.png
+          retention-days: 7
