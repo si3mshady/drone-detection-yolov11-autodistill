@@ -57,6 +57,7 @@ jobs:
           pip install requests==2.32.3 urllib3==2.4.0
           pip install tqdm==4.67.1 packaging==25.0
           pip install wandb==0.21.0
+          pip install roboflow
       
       - name: Clean Dataset (Clean Slate Method)
         run: |
