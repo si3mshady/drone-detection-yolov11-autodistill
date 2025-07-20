@@ -10,74 +10,77 @@ jobs:
   train:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
+    
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
+      
       - name: Install Dependencies
         run: |
           pip install ultralytics autodistill autodistill-grounded-sam
-
+      
       - name: Clean Dataset (Clean Slate Method)
-        run: rm -rf dataset/
-
+        run: |
+          echo "🧹 Clean slate - removing old dataset..."
+          rm -rf dataset/
+      
       - name: Count Images
         run: |
-          image_count=$(find images/ -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | wc -l)
+          image_count=$(find images/ -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" 2>/dev/null | wc -l)
           echo "📊 Found $image_count images to process"
           if [ $image_count -eq 0 ]; then
             echo "❌ No images found in images/ folder"
             exit 1
           fi
-
+      
       - name: Autodistill Labeling and YOLO Training
         env:
           WANDB_API_KEY: "632f1185ffe5698beda8749147a1a6772de21e39"
           PYTHONUNBUFFERED: "1"
-          EPOCHS: "50"
         run: |
-          python - << 'PYCODE'
-import os
-from autodistill_grounded_sam import GroundedSAM
-from autodistill.detection import CaptionOntology
-from ultralytics import YOLO
-
-# Zero‐shot annotation
-ontology = CaptionOntology({
-    'DJI Phantom drone flying in the sky': 'drone',
-    'DJI Phantom drone on a surface': 'drone'
-})
-print('🔍 Auto-labeling images...')
-base = GroundedSAM(ontology=ontology)
-base.label(input_folder='./images', output_folder='dataset')
-
-# Verify
-n_labels = len(os.listdir('dataset/train/labels'))
-n_images = len(os.listdir('dataset/train/images'))
-print(f'✅ Dataset created: {n_labels} labels for {n_images} images')
-if n_labels == 0:
-    raise RuntimeError('❌ No labels created')
-
-# Train
-print(f'🎯 Training YOLOv11 for {os.getenv("EPOCHS")} epochs...')
-model = YOLO('yolo11n-seg.pt')
-model.train(
-    data='dataset/data.yaml',
-    epochs=5,
-    imgsz=640,
-    batch=16,
-    patience=25,
-    verbose=True
-)
-print('🎉 Training completed!')
-PYCODE
-
+          python3 << 'EOF'
+          import os
+          from autodistill_grounded_sam import GroundedSAM
+          from autodistill.detection import CaptionOntology
+          from ultralytics import YOLO
+          
+          print('🔍 Auto-labeling images with GroundedSAM...')
+          ontology = CaptionOntology({
+              'DJI Phantom drone flying in the sky': 'drone',
+              'DJI Phantom drone on a surface': 'drone'
+          })
+          
+          base = GroundedSAM(ontology=ontology)
+          base.label(input_folder='./images', output_folder='dataset')
+          
+          # Verify dataset creation
+          n_labels = len(os.listdir('dataset/train/labels'))
+          n_images = len(os.listdir('dataset/train/images'))
+          print(f'✅ Dataset created: {n_labels} labels for {n_images} images')
+          
+          if n_labels == 0:
+              raise RuntimeError('❌ No labels created')
+          
+          # Train YOLO model
+          print('🎯 Training YOLOv11 for 50 epochs...')
+          model = YOLO('yolo11n-seg.pt')
+          model.train(
+              data='dataset/data.yaml',
+              epochs=50,
+              imgsz=640,
+              batch=16,
+              patience=25,
+              verbose=True
+          )
+          
+          print('🎉 Training completed!')
+          EOF
+      
       - name: Upload Trained Model
         uses: actions/upload-artifact@v4
         if: success()
