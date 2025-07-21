@@ -47,6 +47,7 @@ jobs:
         run: |
           pip install --upgrade pip setuptools wheel
           pip install ultralytics autodistill autodistill-grounded-sam
+          pip install roboflow
           pip install opencv-python==4.11.0.86 opencv-contrib-python==4.11.0.86
           pip install scipy==1.15.3 scikit-image==0.25.2 scikit-learn==1.6.1
           pip install pillow==11.2.1 imageio==2.37.0
@@ -57,7 +58,6 @@ jobs:
           pip install requests==2.32.3 urllib3==2.4.0
           pip install tqdm==4.67.1 packaging==25.0
           pip install wandb==0.21.0
-          pip install roboflow
       
       - name: Clean Dataset (Clean Slate Method)
         run: |
@@ -84,9 +84,8 @@ jobs:
             exit 1
           fi
           
-          # List actual images found
           echo "📋 Images found:"
-          find images/ -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" | head -5
+          find images/ -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" | head -10
       
       - name: Autodistill Labeling and YOLO Training
         env:
@@ -107,7 +106,7 @@ jobs:
           image_files = glob.glob('images/*.jpg') + glob.glob('images/*.jpeg') + glob.glob('images/*.png')
           print(f'Found {len(image_files)} image files: {image_files}')
           
-          for img_path in image_files[:3]:  # Check first 3 images
+          for img_path in image_files[:3]:
               try:
                   img = cv2.imread(img_path)
                   if img is not None:
@@ -119,63 +118,56 @@ jobs:
           
           print('🔍 Auto-labeling images with GroundedSAM...')
           
-          # IMPROVED ONTOLOGY - Broad prompts with lower thresholds
+          # Broad prompts with lower thresholds
           ontology = CaptionOntology({
               'drone': 'drone',
               'quadcopter': 'drone',
               'aircraft': 'drone'
           })
           
-          # Lower thresholds for better detection
           base = GroundedSAM(
               ontology=ontology,
-              box_threshold=0.20,   # Lower from default 0.35
-              text_threshold=0.20   # Lower from default 0.25
+              box_threshold=0.20,
+              text_threshold=0.20
           )
           
           base.label(input_folder='./images', output_folder='dataset')
           
-          # FIXED: Count labels from BOTH train AND validation folders
+          # Enhanced verification with debugging
           print('📊 Checking dataset creation...')
           train_images = glob.glob('dataset/train/images/*')
           train_labels = glob.glob('dataset/train/labels/*')
           valid_images = glob.glob('dataset/valid/images/*')
           valid_labels = glob.glob('dataset/valid/labels/*')
           
-          # Count TOTAL labels across both folders
-          total_labels = len(train_labels) + len(valid_labels)
-          total_images = len(train_images) + len(valid_images)
+          # Move validation data to training if needed
+          if len([f for f in train_images if not f.endswith('.gitkeep')]) == 0:
+              print('📁 Moving validation data to training set...')
+              import shutil
+              for img_file in valid_images:
+                  if not img_file.endswith('.gitkeep'):
+                      dst = img_file.replace('/valid/', '/train/')
+                      shutil.move(img_file, dst)
+                      
+              for label_file in valid_labels:
+                  if not label_file.endswith('.gitkeep'):
+                      dst = label_file.replace('/valid/', '/train/')
+                      shutil.move(label_file, dst)
+              
+              print('✅ Data moved to training directory')
           
-          print(f'📊 Training: {len(train_images)} images, {len(train_labels)} labels')
-          print(f'📊 Validation: {len(valid_images)} images, {len(valid_labels)} labels')
-          print(f'✅ Total dataset: {total_labels} labels for {total_images} images')
+          # Recount after potential moving
+          train_images = glob.glob('dataset/train/images/*')
+          train_labels = glob.glob('dataset/train/labels/*')
+          total_labels = len([f for f in train_labels if not f.endswith('.gitkeep')])
+          total_images = len([f for f in train_images if not f.endswith('.gitkeep')])
           
-          # Check ALL label files (training + validation)
-          all_labels = train_labels + valid_labels
-          if all_labels:
-              print('✅ Label files found:')
-              for label_file in all_labels[:5]:
-                  print(f'  📄 {label_file}')
-                  # Check if label file has content
-                  try:
-                      with open(label_file, 'r') as f:
-                          lines = f.readlines()
-                          print(f'      Contains {len(lines)} detection(s)')
-                  except:
-                      print(f'      Could not read label file')
-          else:
-              print('❌ No label files created anywhere')
-              print('🔍 Debugging: Listing all created files...')
-              import subprocess
-              result = subprocess.run(['find', 'dataset/', '-type', 'f'], capture_output=True, text=True)
-              print('Files in dataset folder:')
-              print(result.stdout)
+          print(f'✅ Final training dataset: {total_labels} labels for {total_images} images')
           
-          # FIXED: Check total labels instead of just training labels
           if total_labels == 0:
-              raise RuntimeError('❌ No labels created - Autodistill did not detect any objects matching the ontology')
+              raise RuntimeError('❌ No labels created for training')
           
-          # Train YOLO model - it will work with labels in either folder
+          # Train YOLO model with explicit project/name to control output directory
           print('🎯 Training YOLOv11 for 50 epochs...')
           model = YOLO('yolo11n-seg.pt')
           model.train(
@@ -184,11 +176,52 @@ jobs:
               imgsz=640,
               batch=16,
               patience=25,
-              verbose=True
+              verbose=True,
+              project='runs/segment',
+              name='drone_training'
           )
           
           print('🎉 Training completed!')
+          
+          # Verify training output files exist
+          import subprocess
+          print('📁 Checking training output files...')
+          result = subprocess.run(['find', 'runs/', '-name', '*.pt', '-o', '-name', '*.csv', '-o', '-name', '*.png'], 
+                                capture_output=True, text=True)
+          print('Training output files found:')
+          print(result.stdout)
           EOF
+      
+      - name: Find Training Output Directory
+        id: find_output
+        run: |
+          # Find the actual training directory (handles train, train2, train3, etc.)
+          if [ -d "runs/segment/drone_training" ]; then
+            TRAIN_DIR="runs/segment/drone_training"
+          else
+            TRAIN_DIR=$(find runs/segment/ -type d -name "train*" | sort -V | tail -1)
+          fi
+          
+          echo "train_dir=$TRAIN_DIR" >> $GITHUB_OUTPUT
+          echo "Found training directory: $TRAIN_DIR"
+          
+          # List contents for verification
+          if [ -d "$TRAIN_DIR" ]; then
+            echo "Contents of $TRAIN_DIR:"
+            find "$TRAIN_DIR" -type f | head -10
+            
+            # Check if weights directory exists
+            if [ -d "$TRAIN_DIR/weights" ]; then
+              echo "Weights directory contents:"
+              ls -la "$TRAIN_DIR/weights/"
+            else
+              echo "⚠️ No weights directory found"
+            fi
+          else
+            echo "❌ No training directory found"
+            echo "Available directories:"
+            find runs/ -type d | head -10
+          fi
       
       - name: Upload Trained Model
         uses: actions/upload-artifact@v4
@@ -196,16 +229,29 @@ jobs:
         with:
           name: drone-model-${{ github.sha }}
           path: |
-            runs/segment/train/weights/best.pt
-            runs/segment/train/weights/last.pt
+            ${{ steps.find_output.outputs.train_dir }}/weights/best.pt
+            ${{ steps.find_output.outputs.train_dir }}/weights/last.pt
           retention-days: 30
       
-      - name: Upload Training Logs (Always)
+      - name: Upload Training Results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: training-logs-${{ github.sha }}
+          name: training-results-${{ github.sha }}
           path: |
-            runs/segment/train/results.csv
-            runs/segment/train/results.png
+            ${{ steps.find_output.outputs.train_dir }}/results.csv
+            ${{ steps.find_output.outputs.train_dir }}/results.png
+            ${{ steps.find_output.outputs.train_dir }}/confusion_matrix.png
+          retention-days: 7
+      
+      - name: Upload All Training Outputs (Fallback)
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: all-outputs-debug-${{ github.sha }}
+          path: |
+            runs/**/*.pt
+            runs/**/*.csv
+            runs/**/*.png
+            runs/**/*.yaml
           retention-days: 7
